@@ -128,6 +128,13 @@ void mastercore::takeMargin(int64_t amount, uint32_t contract_traded, const CDIn
 
     // if we need more margin, we add the difference.
     // updating amount reserved for the order
+    // TODO(security): see review finding #2 (gist 5aafd38f6d35cc28ff41821a6dbd1f23):
+    // the success/failure branches below appear inverted - update_tally_map
+    // returns true on success, so on a *successful* debit this logs "Failed"
+    // and skips updateAmountReserved, while on a *failed* debit it reserves
+    // anyway; amount_reserved therefore diverges from actual balances. Not
+    // changed in this batch: flipping the branch is an economically sensitive,
+    // consensus-visible accounting change and needs maintainer sign-off.
     if(!update_tally_map(elem->getAddr(), colateral, -amountOfMoney, BALANCE)){
         elem->updateAmountReserved(amountOfMoney);
     } else {
