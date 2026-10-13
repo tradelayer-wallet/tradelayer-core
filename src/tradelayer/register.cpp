@@ -81,32 +81,73 @@ int64_t Register::getPosMarkPrice(const uint32_t contractId, bool isOracle) cons
     return 0;
 }  
 
-int64_t Register::getLiquidationPrice(const uint32_t contractId, const uint32_t notionalSize, const uint64_t marginRequirement) const
+/**
+ * Shared liquidation/bankruptcy price computation (adversarial re-review fix
+ * for finding #1): used by BOTH Register::getLiquidationPrice (RPC display via
+ * getFullContractRecord) and Register::setBankruptcyPrice (the consensus
+ * writer of the BANKRUPTCY_PRICE record via updateAllEntry ->
+ * set_bankruptcy_price_onmap), so the two paths can no longer drift apart.
+ *
+ *   dliqPrice = 1 / ( totalMargin / (position * notionalSize) + COIN / entryPrice )
+ *
+ * totalMargin is the full margin backing the position (position *
+ * margin_requirement for getLiquidationPrice, the reserved init margin for
+ * setBankruptcyPrice). The entry-price term is COIN / entryPrice: the old
+ * setBankruptcyPrice used 1 / entryPrice there (plain integer division ==
+ * 0), which was yet another divergence between the two formulas.
+ *
+ * Every division below is a floating-point division on purpose: the old
+ * setBankruptcyPrice divided int64_t / int64_t first (truncating to 0 for any
+ * realistic ratio, and raising SIGFPE when position * notionalSize was 0),
+ * then computed 1 / (0 + 0) == inf and fed it to DoubleToInt64() ->
+ * StrToInt64("inf"), which throws and aborts block connection.
+ *
+ * The result is scaled by COIN *before* truncating to int64_t (scaling after
+ * the cast drops the fraction and yields 0 for any price below 1.0) and
+ * bounded so the multiplication and the cast cannot overflow. NaN and
+ * infinity fail both comparisons below, so those cases fall through to the 0
+ * return as well.
+ *
+ * Returns 0 when no valid positive price can be computed (zero position, zero
+ * notional size, non-positive entry price, non-finite/non-positive result),
+ * matching the historical "price = 0" fallback.
+ */
+static int64_t computeLiquidationPrice(double totalMargin, int64_t position, uint32_t notionalSize, int64_t entryPrice)
 {
-    int64_t liqPrice  = 0;
-
-    const int64_t position = getRecord(contractId, CONTRACT_POSITION);
-    const int64_t entryPrice = getPosEntryPrice(contractId);
-
-    const int64_t marginNeeded = (int64_t) position *  marginRequirement;
-    const double firstFactor = (double) marginNeeded / (position * notionalSize);
-    double secondFactor = 0;
-    if(entryPrice != 0){
-      double secondFactor = (double) COIN / entryPrice;
+    // zero position or zero notional size would make the margin term divide
+    // by zero; a non-positive entry price makes the reciprocal term
+    // meaningless (insertEntry() only ever records positive prices)
+    if (position == 0 || notionalSize == 0 || entryPrice <= 0) {
+        return 0;
     }
-    const double denominator =  firstFactor + secondFactor;
+
+    const double firstFactor = totalMargin / ((double) position * (double) notionalSize);
+    const double secondFactor = (double) COIN / (double) entryPrice;
+    const double denominator = firstFactor + secondFactor;
 
     const double dliqPrice = (denominator != 0) ? 1 / denominator : 0;
 
-    if (0 < dliqPrice)
+    if (0 < dliqPrice && dliqPrice < (double) (MAX_INT_8_BYTES / COIN))
     {
-        PrintToLog("%s(): liqPrice is less than zero: %lf, liquidation price = 0 !\n",__func__, dliqPrice);
-    } else {
-        liqPrice = (int64_t) dliqPrice * COIN;
+        return (int64_t) (dliqPrice * COIN);
     }
 
+    PrintToLog("%s(): liqPrice is not a valid positive price: %lf, liquidation price = 0 !\n",__func__, dliqPrice);
+    return 0;
+}
 
-    PrintToLog("%s(): liqPrice (double) : %d, liqPrice (int) : %d\n",__func__, dliqPrice, liqPrice);
+int64_t Register::getLiquidationPrice(const uint32_t contractId, const uint32_t notionalSize, const uint64_t marginRequirement) const
+{
+    const int64_t position = getRecord(contractId, CONTRACT_POSITION);
+    const int64_t entryPrice = getPosEntryPrice(contractId);
+
+    // full margin backing the position; computed in double so the
+    // multiplication cannot overflow the integer range
+    const double marginTotal = (double) position * (double) marginRequirement;
+
+    const int64_t liqPrice = computeLiquidationPrice(marginTotal, position, notionalSize, entryPrice);
+
+    PrintToLog("%s(): liqPrice (int64_t) : %d\n",__func__, liqPrice);
 
     return liqPrice;
 
@@ -180,16 +221,25 @@ bool Register::setBankruptcyPrice(const uint32_t contractId, const uint32_t noti
 {
     const int64_t position = getRecord(contractId, CONTRACT_POSITION);
     const int64_t entryPrice = getPosEntryPrice(contractId);
-    double dBankruptcyPrice = 0;
-    if(entryPrice!=0){
-        dBankruptcyPrice  =  (double) 1 / (initMargin / (position * notionalSize) + (1/entryPrice));
-    }else if(entryPrice==0){
-        dBankruptcyPrice=0;
-    }
-    
-    PrintToLog("%s(): bankruptcyPrice: %d\n",__func__, dBankruptcyPrice);
 
-    const int bankruptcyPrice = DoubleToInt64(dBankruptcyPrice);
+    // This is the consensus writer of the BANKRUPTCY_PRICE record
+    // (updateAllEntry -> set_bankruptcy_price_onmap -> here), so it must use
+    // the exact same fixed-point computation as the RPC display path
+    // (getLiquidationPrice): the shared computeLiquidationPrice() helper
+    // (adversarial re-review fix for finding #1).
+    //
+    // The old body computed
+    //   1 / (initMargin / (position * notionalSize) + 1 / entryPrice)
+    // with plain integer divisions: initMargin / (position * notionalSize)
+    // truncated to 0 for any realistic ratio and raised SIGFPE when
+    // position * notionalSize was 0, 1 / entryPrice truncated to 0, and
+    // 1 / (0 + 0) == inf then went through DoubleToInt64() ->
+    // StrToInt64("inf"), which throws (uncaught during block connection).
+    // The result was also stored through a "const int", truncating the int64_t
+    // to int32_t. initMargin is the full reserved margin for the position.
+    const int64_t bankruptcyPrice = computeLiquidationPrice((double) initMargin, position, notionalSize, entryPrice);
+
+    PrintToLog("%s(): bankruptcyPrice: %d\n",__func__, bankruptcyPrice);
 
     return updateRecord(contractId, bankruptcyPrice, BANKRUPTCY_PRICE);
 }
@@ -667,7 +717,7 @@ bool mastercore::insert_entry(const std::string& who, uint32_t contractId, int64
 
 
 
-bool mastercore::decrease_entry(const std::string& who, uint32_t contractId, int64_t amount, int64_t price, bool inverse, int64_t collateral_currency)
+bool mastercore::decrease_entry(const std::string& who, uint32_t contractId, int64_t amount, int64_t price, bool inverse, int64_t collateral_currency, int direction)
 {
     bool bRet = false;
     if (0 == amount) {
@@ -685,13 +735,13 @@ bool mastercore::decrease_entry(const std::string& who, uint32_t contractId, int
 
     Register& reg = my_it->second;
 
-    bRet = reg.decreasePosRecord(who,contractId, amount, price, inverse, collateral_currency);
+    bRet = reg.decreasePosRecord(who,contractId, amount, price, inverse, collateral_currency, direction);
 
     return bRet;
 }
 
 // Decrease Position Record
-bool Register::decreasePosRecord(const std::string& who, uint32_t contractId, int64_t amount, int64_t price, bool inverse, int64_t collateral_currency)
+bool Register::decreasePosRecord(const std::string& who, uint32_t contractId, int64_t amount, int64_t price, bool inverse, int64_t collateral_currency, int direction)
 {
     bool bRet = false;
     RecordMap::iterator it = mp_record.find(contractId);
@@ -707,6 +757,17 @@ bool Register::decreasePosRecord(const std::string& who, uint32_t contractId, in
 
         auto itt = entries.begin();
 
+        // The loop below used to call entries.erase(itt) and then build a
+        // replacement pair from references into the erased element and
+        // push_back it into the same vector (which may also reallocate),
+        // without ever advancing itt otherwise: dangling references and an
+        // invalidated iterator (UB), plus skipped/mis-accounted entries when
+        // more than one entry had to be consumed. Use the iterator returned by
+        // erase() to advance, and collect reduced entries in a separate vector
+        // that is appended after the loop (same final ordering as intended:
+        // a partially closed entry moves to the back).
+        Entries additions;
+
         while(remaining > 0 && itt != entries.end())
         {
             // process to calculate it
@@ -720,20 +781,24 @@ bool Register::decreasePosRecord(const std::string& who, uint32_t contractId, in
                 // smaller remaining
                 remaining -= ramount;
                 PrintToLog("%s():deleting full entry: amount: %d, price: %d\n",__func__, ramount, rprice);
-                realizePNL(who, contractId, ramount,price, inverse, collateral_currency);
-                entries.erase(itt);
+                realizePNL(who, contractId, ramount,price, inverse, collateral_currency, direction);
+                itt = entries.erase(itt);
             } else {
                 //there's nothing left
                 ramount -= remaining;
                 remaining = 0;
-                realizePNL(who, contractId, ramount,price, inverse, collateral_currency);
-                entries.erase(itt);
-                std::pair<int64_t,int64_t> p (ramount, rprice);
-                entries.push_back(p);
+                realizePNL(who, contractId, ramount,price, inverse, collateral_currency, direction);
+                // copy the reduced entry out and log while the element is still
+                // alive; the old code read ramount/rprice after erase()
+                additions.push_back(std::make_pair(ramount, rprice));
                 PrintToLog("%s() there's nothing else (remaining == 0), ramount left: %d, at price: %d\n",__func__, ramount, rprice);
+                itt = entries.erase(itt);
             }
 
         }
+
+        // re-append partially closed entries collected during the loop
+        entries.insert(entries.end(), additions.begin(), additions.end());
 
         // closing position and then open a new one on the other side
         if (remaining > 0)
@@ -752,7 +817,7 @@ bool Register::decreasePosRecord(const std::string& who, uint32_t contractId, in
     return bRet;
 }
 
-bool Register::realizePNL(const std::string& who, uint32_t contractId, int64_t amount, int64_t price, bool isInverseQuoted, uint32_t collateral_currency) 
+bool Register::realizePNL(const std::string& who, uint32_t contractId, int64_t amount, int64_t price, bool isInverseQuoted, uint32_t collateral_currency, int direction)
 {
             //we want to do what settlementPNL does but with actual exit prices instead of mark prices
           //this is called when the logic of xTrade or instant trade in mdex.cpp notes a reduction in position. 
@@ -762,18 +827,53 @@ bool Register::realizePNL(const std::string& who, uint32_t contractId, int64_t a
       int64_t notionalsize = 1; //this is a temporary measure for testing, really I need to route this parameter into this function flow 
     LOCK(cs_register);
     
-        //pass the string into the new function
+        // NOTE: despite its name, "entry" below is NOT the position's entry
+        // price: it is the mark price of the position as of the last block
+        // (getPosMarkPrice(contractId, true)), i.e. we do what settlement_pnl
+        // does but with the actual exit price of this reduction ("price")
+        // instead of the mark price.
         const int64_t entry = getPosMarkPrice(contractId, true);
         const int64_t exit = price;
         int64_t realizedPNL = 0;
         
-        if(entry||exit==0){
+        // The guard used to be "if(entry||exit==0)", which is true for every
+        // non-zero entry price (zeroing the PnL in the normal case) and lets
+        // entry == 0 fall through to the divisions below - an integer
+        // divide-by-zero. Reject the degenerate cases instead: no entry price,
+        // or a zero exit price (also a divisor).
+        if(entry == 0 || exit == 0){
             realizedPNL = 0;
         }else{
+            // Both formulas below are written for the LONG side (a long
+            // profits when the price rises, matching the sign rule in
+            // getUPNL) and are then multiplied by the direction of the
+            // position being closed (direction > 0: long, < 0: short), so a
+            // short close gets the mirrored PnL. Without the direction
+            // multiplier the expressions were direction-blind and e.g. a
+            // profitable long close on an inverse contract (entry = 2e8,
+            // exit = 3e8) came out as (1/exit - 1/entry) * notional < 0.
             if(isInverseQuoted){
-                realizedPNL = 1/exit - 1/entry *notionalsize;
+                // Long-side realized PnL over the notional for inverse-quoted
+                // contracts, in COIN-scaled fixed point:
+                // (1/entry - 1/exit) * notionalsize. With COIN-scaled prices
+                // the COIN-scaled reciprocal of a price is COIN*COIN/price,
+                // hence the expression below. (The first fixed version had
+                // "1/exit - 1/entry", the short-side convention, which made a
+                // profitable long close negative.)
+                realizedPNL = ((COIN * COIN) / entry - (COIN * COIN) / exit) * notionalsize;
             }else{
-                realizedPNL = exit - entry *notionalsize;
+                // Long-side realized PnL over the notional for linear
+                // contracts: (exit - entry) * notionalsize. The old precedence
+                // computed exit - (entry * notionalsize).
+                realizedPNL = (exit - entry) * notionalsize;
+            }
+
+            // "direction" is the sign of the position this reduction closes,
+            // threaded down from updateAllEntry()'s signOld (the entry amounts
+            // consumed here are unsigned, so the direction cannot be recovered
+            // locally: insert_entry() always receives a positive count).
+            if (direction < 0) {
+                realizedPNL = -realizedPNL;
             }
         }
 
