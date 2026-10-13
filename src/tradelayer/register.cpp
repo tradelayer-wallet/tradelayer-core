@@ -890,10 +890,12 @@ bool Register::realizePNL(const std::string& who, uint32_t contractId, int64_t a
         // price: it is the mark price of the position as of the last block
         // (getPosMarkPrice(contractId, true)), i.e. we do what settlement_pnl
         // does but with "price" instead of the mark price. "price" is NOT the
-        // execution price of the fill: it is the effective (limit) price of the
-        // order being reduced (elem->getEffectivePrice() at the decrease_entry()
-        // call in updateAllEntry()). The execution price (x_TradeBidirectional's
-        // sellerPrice) is not passed here.
+        // execution price of the fill: it is the effective price of the order
+        // being reduced (elem->getEffectivePrice() at the decrease_entry() call
+        // in updateAllEntry()). For a limit order that is the price it was
+        // submitted with (ContractDex_ADD); for a market or liquidation order it
+        // is the oracle TWAP (ContractDex_ADD_MARKET_PRICE). The execution price
+        // (x_TradeBidirectional's sellerPrice) is not passed here.
         const int64_t entry = getPosMarkPrice(contractId, true);
         const int64_t exit = price;
         int64_t realizedPNL = 0;
