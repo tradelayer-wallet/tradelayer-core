@@ -598,9 +598,6 @@ bool mastercore::getEntryFromName(const std::string& name, uint32_t& propertyId,
 
 int mastercore::addInterestPegged(int nBlock)
 {
-    int64_t priceIndex = 0;
-    int64_t nMarketPrice = 0;
-
     for (std::unordered_map<std::string, CMPTally>::iterator it = mp_tally_map.begin(); it != mp_tally_map.end(); ++it) {
             uint32_t id = 0;
             std::string address = it->first;
@@ -619,6 +616,14 @@ int mastercore::addInterestPegged(int nBlock)
 
                 const int deadline = cd.blocks_until_expiration + cd.init_block;
                 if (deadline != nBlock) { continue; }
+
+                // Reset per iteration (adversarial re-review fix): these used
+                // to be declared outside the loops and assigned only in the
+                // cd.isOracle() branch, so native/skipped iterations reused
+                // the previous pegged currency's priceIndex/nMarketPrice in
+                // the diff and the guard below.
+                int64_t priceIndex = 0;
+                int64_t nMarketPrice = 0;
 
                 // natives or oracles?
                 if(cd.isOracle()) {

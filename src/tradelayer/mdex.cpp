@@ -185,7 +185,7 @@ void mastercore::updateAllEntry(int64_t oldPosition, int64_t newPosition, int64_
         // decreasing -> delete some contracts in entry
         } else {
 
-            if(!decrease_entry(elem->getAddr(), contract_traded, nCouldBuy, elem->getEffectivePrice(), cd.isInverseQuoted(), cd.collateral_currency)){
+            if(!decrease_entry(elem->getAddr(), contract_traded, nCouldBuy, elem->getEffectivePrice(), cd.isInverseQuoted(), cd.collateral_currency, signOld)){
                 PrintToLog("%s() decreasing position Failed\n",__func__);
             }
         }
@@ -209,13 +209,13 @@ void mastercore::updateAllEntry(int64_t oldPosition, int64_t newPosition, int64_
        update_register_map(elem->getAddr(), contract_traded, -remainingMargin, MARGIN);
        update_tally_map(elem->getAddr(), cd.collateral_currency, remainingMargin, BALANCE);
 
-       decrease_entry(elem->getAddr(), contract_traded, nCouldBuy, elem->getEffectivePrice(), cd.isInverseQuoted(), cd.collateral_currency);
+       decrease_entry(elem->getAddr(), contract_traded, nCouldBuy, elem->getEffectivePrice(), cd.isInverseQuoted(), cd.collateral_currency, signOld);
 
      // closing position and opening another from different side
    } else if (signOld != signNew && (signOld != 0 && signNew != 0)) {
 
          PrintToLog("%s() closing position and opening another from different side\n",__func__);
-         decrease_entry(elem->getAddr(), contract_traded, nCouldBuy, elem->getEffectivePrice(), cd.isInverseQuoted(), cd.collateral_currency);
+         decrease_entry(elem->getAddr(), contract_traded, nCouldBuy, elem->getEffectivePrice(), cd.isInverseQuoted(), cd.collateral_currency, signOld);
 
          const int64_t remainingMargin = getContractRecord(elem->getAddr(), contract_traded, MARGIN);
 
@@ -3009,6 +3009,19 @@ int64_t mastercore::ContractBasisPoints(const CDInfo::Entry& cd, int64_t amount,
 
     const arith_uint256 aFee = ConvertTo256(factor.first) * (aPositionRequirement /  ConvertTo256(factor.second));
     const arith_uint256 aRealRequirement = DivideAndRoundUp(aPositionRequirement, aLeverage);
+
+    // Bound the total before converting to int64_t (adversarial re-review
+    // fix): amount * margin_requirement / leverage can exceed the int64 range
+    // for payload amounts that pass the per-field checks (e.g. amount = 1e11,
+    // margin_requirement = 1e9, leverage = 1 gives 1e20), and the ConvertTo64()
+    // calls below would assert (debug) or truncate (release). Clamp to
+    // MAX_INT_8_BYTES: checkContractReserve() then compares it against the
+    // sender's real balance, which can never reach that value, so such orders
+    // are deterministically rejected as undercollateralized instead of
+    // crashing/overflowing.
+    if (ConvertTo256(MAX_INT_8_BYTES) < aFee || ConvertTo256(MAX_INT_8_BYTES) < aRealRequirement || ConvertTo256(MAX_INT_8_BYTES) < (aFee + aRealRequirement)) {
+        return (int64_t) MAX_INT_8_BYTES;
+    }
 
     // total amount required
     return (ConvertTo64(aFee) + ConvertTo64(aRealRequirement));
