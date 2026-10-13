@@ -92,17 +92,27 @@ int64_t Register::getLiquidationPrice(const uint32_t contractId, const uint32_t 
     const double firstFactor = (double) marginNeeded / (position * notionalSize);
     double secondFactor = 0;
     if(entryPrice != 0){
-      double secondFactor = (double) COIN / entryPrice;
+      // This used to declare a new inner "double secondFactor", shadowing the
+      // outer one, so the entry-price term of the denominator was always 0.
+      // Assign to the outer variable instead.
+      secondFactor = (double) COIN / entryPrice;
     }
     const double denominator =  firstFactor + secondFactor;
 
     const double dliqPrice = (denominator != 0) ? 1 / denominator : 0;
 
-    if (0 < dliqPrice)
+    // The branches below were inverted: a valid positive price only got logged
+    // while liqPrice stayed 0, and the assignment ran for zero/negative values.
+    // Assign on the positive branch, scale by COIN *before* truncating to
+    // int64_t (the old "(int64_t) dliqPrice * COIN" dropped the fractional part
+    // and yielded 0 for any price below 1.0), and bound the result so the cast
+    // cannot overflow. NaN and infinity fail both comparisons, so those cases
+    // still fall through to liqPrice = 0.
+    if (0 < dliqPrice && dliqPrice < (double) (MAX_INT_8_BYTES / COIN))
     {
-        PrintToLog("%s(): liqPrice is less than zero: %lf, liquidation price = 0 !\n",__func__, dliqPrice);
+        liqPrice = (int64_t) (dliqPrice * COIN);
     } else {
-        liqPrice = (int64_t) dliqPrice * COIN;
+        PrintToLog("%s(): liqPrice is not a valid positive price: %lf, liquidation price = 0 !\n",__func__, dliqPrice);
     }
 
 
@@ -707,6 +717,17 @@ bool Register::decreasePosRecord(const std::string& who, uint32_t contractId, in
 
         auto itt = entries.begin();
 
+        // The loop below used to call entries.erase(itt) and then build a
+        // replacement pair from references into the erased element and
+        // push_back it into the same vector (which may also reallocate),
+        // without ever advancing itt otherwise: dangling references and an
+        // invalidated iterator (UB), plus skipped/mis-accounted entries when
+        // more than one entry had to be consumed. Use the iterator returned by
+        // erase() to advance, and collect reduced entries in a separate vector
+        // that is appended after the loop (same final ordering as intended:
+        // a partially closed entry moves to the back).
+        Entries additions;
+
         while(remaining > 0 && itt != entries.end())
         {
             // process to calculate it
@@ -721,19 +742,23 @@ bool Register::decreasePosRecord(const std::string& who, uint32_t contractId, in
                 remaining -= ramount;
                 PrintToLog("%s():deleting full entry: amount: %d, price: %d\n",__func__, ramount, rprice);
                 realizePNL(who, contractId, ramount,price, inverse, collateral_currency);
-                entries.erase(itt);
+                itt = entries.erase(itt);
             } else {
                 //there's nothing left
                 ramount -= remaining;
                 remaining = 0;
                 realizePNL(who, contractId, ramount,price, inverse, collateral_currency);
-                entries.erase(itt);
-                std::pair<int64_t,int64_t> p (ramount, rprice);
-                entries.push_back(p);
+                // copy the reduced entry out and log while the element is still
+                // alive; the old code read ramount/rprice after erase()
+                additions.push_back(std::make_pair(ramount, rprice));
                 PrintToLog("%s() there's nothing else (remaining == 0), ramount left: %d, at price: %d\n",__func__, ramount, rprice);
+                itt = entries.erase(itt);
             }
 
         }
+
+        // re-append partially closed entries collected during the loop
+        entries.insert(entries.end(), additions.begin(), additions.end());
 
         // closing position and then open a new one on the other side
         if (remaining > 0)
@@ -767,13 +792,27 @@ bool Register::realizePNL(const std::string& who, uint32_t contractId, int64_t a
         const int64_t exit = price;
         int64_t realizedPNL = 0;
         
-        if(entry||exit==0){
+        // The guard used to be "if(entry||exit==0)", which is true for every
+        // non-zero entry price (zeroing the PnL in the normal case) and lets
+        // entry == 0 fall through to the divisions below - an integer
+        // divide-by-zero. Reject the degenerate cases instead: no entry price,
+        // or a zero exit price (also a divisor).
+        if(entry == 0 || exit == 0){
             realizedPNL = 0;
         }else{
             if(isInverseQuoted){
-                realizedPNL = 1/exit - 1/entry *notionalsize;
+                // Realized PnL over the notional for inverse-quoted contracts,
+                // in COIN-scaled fixed point: (1/exit - 1/entry) * notionalsize.
+                // With COIN-scaled prices the COIN-scaled reciprocal of a price
+                // is COIN*COIN/price, hence the expression below. The old code
+                // computed "1/exit - 1/entry *notionalsize" with plain integer
+                // division (1/exit == 0) and wrong precedence, i.e. always 0.
+                realizedPNL = ((COIN * COIN) / exit - (COIN * COIN) / entry) * notionalsize;
             }else{
-                realizedPNL = exit - entry *notionalsize;
+                // Realized PnL over the notional for linear contracts:
+                // (exit - entry) * notionalsize. The old precedence computed
+                // exit - (entry * notionalsize).
+                realizedPNL = (exit - entry) * notionalsize;
             }
         }
 
