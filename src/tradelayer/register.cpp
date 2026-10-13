@@ -872,7 +872,7 @@ bool Register::decreasePosRecord(const std::string& who, uint32_t contractId, in
 
 bool Register::realizePNL(const std::string& who, uint32_t contractId, int64_t amount, int64_t price, bool isInverseQuoted, uint32_t collateral_currency, int direction)
 {
-            //we want to do what settlementPNL does but with actual exit prices instead of mark prices
+            //we want to do what settlementPNL does but with the exit price of the reducing order instead of mark prices
           //this is called when the logic of xTrade or instant trade in mdex.cpp notes a reduction in position. 
           //it's probable that a version simply referring to the mark price of the last block, being parsed this block in the tx_handler, would capture any
           //excess PNL or loss since the last block would only be updating, this makes sense (vs. calculating the whole trade PNL)
@@ -883,8 +883,11 @@ bool Register::realizePNL(const std::string& who, uint32_t contractId, int64_t a
         // NOTE: despite its name, "entry" below is NOT the position's entry
         // price: it is the mark price of the position as of the last block
         // (getPosMarkPrice(contractId, true)), i.e. we do what settlement_pnl
-        // does but with the actual exit price of this reduction ("price")
-        // instead of the mark price.
+        // does but with "price" instead of the mark price. "price" is NOT the
+        // execution price of the fill: it is the effective (limit) price of the
+        // order being reduced (elem->getEffectivePrice() at the decrease_entry()
+        // call in updateAllEntry()). The execution price (x_TradeBidirectional's
+        // sellerPrice) is not passed here.
         const int64_t entry = getPosMarkPrice(contractId, true);
         const int64_t exit = price;
         int64_t realizedPNL = 0;
