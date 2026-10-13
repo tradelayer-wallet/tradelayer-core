@@ -156,11 +156,12 @@ int64_t Register::getLiquidationPrice(const uint32_t contractId, const uint32_t 
     const int64_t entryPrice = getPosEntryPrice(contractId);
 
     // full margin backing the position, as a magnitude (same convention as
-    // setBankruptcyPrice); computed in double so the multiplication cannot
-    // overflow the integer range. Previously this was the signed product
-    // position * marginRequirement, which cancelled the sign of the position
-    // and always produced the long-side formula for shorts.
-    const double marginTotal = (double) std::llabs(position) * (double) marginRequirement;
+    // setBankruptcyPrice); computed in double so neither the magnitude nor the
+    // multiplication can overflow the integer range. The abs is taken on the
+    // double: std::llabs(INT64_MIN) is undefined behavior. Previously this was
+    // the signed product position * marginRequirement, which cancelled the
+    // sign of the position and always produced the long-side formula for shorts.
+    const double marginTotal = std::fabs((double) position) * (double) marginRequirement;
 
     const int64_t liqPrice = computeLiquidationPrice(marginTotal, position, notionalSize, entryPrice);
 
