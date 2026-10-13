@@ -88,7 +88,10 @@ int64_t Register::getPosMarkPrice(const uint32_t contractId, bool isOracle) cons
  * for finding #1): used by BOTH Register::getLiquidationPrice (RPC display via
  * getFullContractRecord) and Register::setBankruptcyPrice (the consensus
  * writer of the BANKRUPTCY_PRICE record via updateAllEntry ->
- * set_bankruptcy_price_onmap), so the two paths can no longer drift apart.
+ * set_bankruptcy_price_onmap). Both paths share this one formula; their
+ * margin inputs are different quantities (see totalMargin below), so the two
+ * prices agree only when the reserved margin equals |position| *
+ * margin_requirement.
  *
  *   dliqPrice = 1 / ( totalMargin / (position * notionalSize) + COIN / entryPrice )
  *
@@ -96,8 +99,10 @@ int64_t Register::getPosMarkPrice(const uint32_t contractId, bool isOracle) cons
  * (getLiquidationPrice: |position| * margin_requirement; setBankruptcyPrice:
  * the reserved init margin). The helper takes fabs() of it itself, so a
  * caller's sign cannot change the result. The direction of the position is
- * carried only by the sign of position in the denominator above (for the
- * inverse-quoted formula: a long's price is below entry, a short's above).
+ * carried only by the sign of position in the denominator above. For the
+ * inverse-quoted formula, any valid long price is below entry and any valid
+ * short price is above it (0 is returned when the denominator makes the
+ * result invalid).
  * The entry-price term is COIN / entryPrice: the old
  * setBankruptcyPrice used 1 / entryPrice there (plain integer division ==
  * 0), which was yet another divergence between the two formulas.
