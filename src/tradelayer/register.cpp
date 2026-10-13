@@ -6,6 +6,8 @@
 #include <tradelayer/externfns.h>
 
 #include <stdint.h>
+#include <cmath>
+#include <cstdlib>
 #include <map>
 
 using namespace mastercore;
@@ -90,9 +92,13 @@ int64_t Register::getPosMarkPrice(const uint32_t contractId, bool isOracle) cons
  *
  *   dliqPrice = 1 / ( totalMargin / (position * notionalSize) + COIN / entryPrice )
  *
- * totalMargin is the full margin backing the position (position *
- * margin_requirement for getLiquidationPrice, the reserved init margin for
- * setBankruptcyPrice). The entry-price term is COIN / entryPrice: the old
+ * totalMargin is the margin backing the position, passed as a magnitude
+ * (getLiquidationPrice: |position| * margin_requirement; setBankruptcyPrice:
+ * the reserved init margin). The helper takes fabs() of it itself, so a
+ * caller's sign cannot change the result. The direction of the position is
+ * carried only by the sign of position in the denominator above (for the
+ * inverse-quoted formula: a long's price is below entry, a short's above).
+ * The entry-price term is COIN / entryPrice: the old
  * setBankruptcyPrice used 1 / entryPrice there (plain integer division ==
  * 0), which was yet another divergence between the two formulas.
  *
@@ -121,7 +127,10 @@ static int64_t computeLiquidationPrice(double totalMargin, int64_t position, uin
         return 0;
     }
 
-    const double firstFactor = totalMargin / ((double) position * (double) notionalSize);
+    // normalize the margin to a magnitude here, so both call sites share one
+    // sign convention (the position sign enters only through the denominator)
+    const double margin = std::fabs(totalMargin);
+    const double firstFactor = margin / ((double) position * (double) notionalSize);
     const double secondFactor = (double) COIN / (double) entryPrice;
     const double denominator = firstFactor + secondFactor;
 
@@ -141,9 +150,12 @@ int64_t Register::getLiquidationPrice(const uint32_t contractId, const uint32_t 
     const int64_t position = getRecord(contractId, CONTRACT_POSITION);
     const int64_t entryPrice = getPosEntryPrice(contractId);
 
-    // full margin backing the position; computed in double so the
-    // multiplication cannot overflow the integer range
-    const double marginTotal = (double) position * (double) marginRequirement;
+    // full margin backing the position, as a magnitude (same convention as
+    // setBankruptcyPrice); computed in double so the multiplication cannot
+    // overflow the integer range. Previously this was the signed product
+    // position * marginRequirement, which cancelled the sign of the position
+    // and always produced the long-side formula for shorts.
+    const double marginTotal = (double) std::llabs(position) * (double) marginRequirement;
 
     const int64_t liqPrice = computeLiquidationPrice(marginTotal, position, notionalSize, entryPrice);
 
