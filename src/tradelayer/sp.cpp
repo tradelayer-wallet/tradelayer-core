@@ -629,6 +629,20 @@ int mastercore::addInterestPegged(int nBlock)
                 }
 
                 const int64_t diff = priceIndex - nMarketPrice;
+
+                // getContractTradesVWAP returns 0 when the contract has no
+                // recorded trades (empty VWAP). The division below would then
+                // throw uint_error("Division by zero") from
+                // arith_uint256::operator/=, aborting block connection, and a
+                // negative diff would trip ConvertTo256's assert(number >= 0).
+                // Both inputs are consensus data, so conservatively skip the
+                // interest update for this pegged currency (no balance change)
+                // instead of crashing or applying a negative interest debit.
+                if (nMarketPrice <= 0 || diff < 0) {
+                    PrintToLog("%s(): skipping interest update: nMarketPrice: %d, diff: %d\n",__func__, nMarketPrice, diff);
+                    continue;
+                }
+
                 arith_uint256 interest = ConvertTo256(diff) / ConvertTo256(nMarketPrice);
 
                 if(msc_debug_interest_pegged) {
