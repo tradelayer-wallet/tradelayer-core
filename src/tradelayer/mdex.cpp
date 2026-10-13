@@ -3000,7 +3000,7 @@ bool mastercore::checkReserve(const std::string& address, int64_t amount, uint32
 }
 
 
-int64_t mastercore::ContractBasisPoints(const CDInfo::Entry& cd, int64_t amount, int64_t leverage)
+bool mastercore::ContractBasisPoints(const CDInfo::Entry& cd, int64_t amount, int64_t leverage, int64_t& required)
 {
     //NOTE: add changes to inverse quoted
     // const int64_t uPrice = COIN;
@@ -3015,21 +3015,22 @@ int64_t mastercore::ContractBasisPoints(const CDInfo::Entry& cd, int64_t amount,
     const arith_uint256 aFee = ConvertTo256(factor.first) * (aPositionRequirement /  ConvertTo256(factor.second));
     const arith_uint256 aRealRequirement = DivideAndRoundUp(aPositionRequirement, aLeverage);
 
-    // Bound the total before converting to int64_t (adversarial re-review
-    // fix): amount * margin_requirement / leverage can exceed the int64 range
-    // for payload amounts that pass the per-field checks (e.g. amount = 1e11,
-    // margin_requirement = 1e9, leverage = 1 gives 1e20), and the ConvertTo64()
-    // calls below would assert (debug) or truncate (release). Clamp to
-    // MAX_INT_8_BYTES: checkContractReserve() then compares it against the
-    // sender's real balance, which can never reach that value, so such orders
-    // are deterministically rejected as undercollateralized instead of
-    // crashing/overflowing.
+    // Bound the total before converting to int64_t: amount * margin_requirement
+    // / leverage can exceed the int64 range for payload amounts that pass the
+    // per-field checks (e.g. amount = 1e11, margin_requirement = 1e9,
+    // leverage = 1 gives 1e20), and the ConvertTo64() calls below would assert
+    // (debug) or truncate (release). An overflowing requirement is reported as
+    // false with required = MAX_INT_8_BYTES; the caller must reject the order.
+    // (This used to be an in-band sentinel that the caller compared against the
+    // balance; that only rejected because no balance was below the sentinel.)
     if (ConvertTo256(MAX_INT_8_BYTES) < aFee || ConvertTo256(MAX_INT_8_BYTES) < aRealRequirement || ConvertTo256(MAX_INT_8_BYTES) < (aFee + aRealRequirement)) {
-        return (int64_t) MAX_INT_8_BYTES;
+        required = MAX_INT_8_BYTES;
+        return false;
     }
 
     // total amount required
-    return (ConvertTo64(aFee) + ConvertTo64(aRealRequirement));
+    required = ConvertTo64(aFee) + ConvertTo64(aRealRequirement);
+    return true;
 
 }
 
@@ -3039,11 +3040,16 @@ bool mastercore::checkContractReserve(const std::string& address, int64_t amount
     if (!_my_cds->getCD(contractId, cd))
        return false;
 
-    amountToReserve = ContractBasisPoints(cd, amount, leverage);
+    const bool fitsInt64 = ContractBasisPoints(cd, amount, leverage, amountToReserve);
 
     PrintToLog("%s(): amountToReserve: %d\n",__func__, amountToReserve);
 
     nBalance = getMPbalance(address, cd.collateral_currency, BALANCE);
+
+    // explicit reject for an overflowing requirement, independent of the balance
+    if (!fitsInt64) {
+        return false;
+    }
 
     return (nBalance < amountToReserve || nBalance == 0) ? false : true;
 

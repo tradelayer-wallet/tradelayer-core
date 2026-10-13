@@ -294,7 +294,7 @@ namespace mastercore
   bool checkReserve(const std::string& address, int64_t amount, uint32_t propertyId, int64_t& nBalance);
   bool checkContractReserve(const std::string& address, int64_t amount, uint32_t contractId, int64_t leverage, int64_t& nBalance, int64_t& amountToReserve);
   int64_t getTotalLives(uint32_t contractId);
-  int64_t ContractBasisPoints(const CDInfo::Entry& cd, int64_t amount, int64_t leverage);
+  bool ContractBasisPoints(const CDInfo::Entry& cd, int64_t amount, int64_t leverage, int64_t& required);
 
   void updateAllEntry(int64_t oldPosition, int64_t newPosition, int64_t nCouldBuy, uint32_t contract_traded, CMPContractDex* elem, const CDInfo::Entry& cd);
   void takeMargin(int64_t amount, uint32_t contract_traded, const CDInfo::Entry& cd, CMPContractDex *elem);
