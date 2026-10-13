@@ -253,7 +253,34 @@ bool Register::setBankruptcyPrice(const uint32_t contractId, const uint32_t noti
 
     PrintToLog("%s(): bankruptcyPrice: %d\n",__func__, bankruptcyPrice);
 
-    return updateRecord(contractId, bankruptcyPrice, BANKRUPTCY_PRICE);
+    // a zero result (no valid price) clears the stored price
+    return setBankruptcyPriceValue(contractId, bankruptcyPrice);
+}
+
+/**
+ * Absolute write of the BANKRUPTCY_PRICE record; 0 clears it.
+ *
+ * This is the single state-setting path for BANKRUPTCY_PRICE, used by the
+ * open/flip writer (setBankruptcyPrice) and by the close path
+ * (clear_bankruptcy_price_onmap). It must not go through updateRecord():
+ *  - updateRecord() is additive for every non-PNL record type, so writing the
+ *    new price through it stacked on top of the stored one (a reopened or
+ *    flipped position stored old + new);
+ *  - updateRecord() rejects a zero amount, so a position that closed, or
+ *    produced no valid price, kept its stale price in consensus state (and in
+ *    GenerateConsensusString(), which hashes this record).
+ * Writing the difference to the target makes the stored value equal the
+ * target in every case, and writes nothing when it is already equal.
+ */
+bool Register::setBankruptcyPriceValue(uint32_t contractId, int64_t price)
+{
+    const int64_t current = getRecord(contractId, BANKRUPTCY_PRICE);
+
+    if (current == price) {
+        return true;
+    }
+
+    return updateRecord(contractId, price - current, BANKRUPTCY_PRICE);
 }
 
 
@@ -636,6 +663,20 @@ bool mastercore::set_bankruptcy_price_onmap(const std::string& who, const uint32
     Register& reg = my_it->second;
     return reg.setBankruptcyPrice(contractId, notionalSize, initMargin);
 
+}
+
+// clears the BANKRUPTCY_PRICE record on the close path; nothing to clear (and
+// no register is created) when the address has no register
+bool mastercore::clear_bankruptcy_price_onmap(const std::string& who, const uint32_t& contractId)
+{
+    LOCK(cs_register);
+    std::unordered_map<std::string, Register>::iterator my_it = mp_register_map.find(who);
+    if (my_it == mp_register_map.end()) {
+        return true;
+    }
+
+    Register& reg = my_it->second;
+    return reg.setBankruptcyPriceValue(contractId, 0);
 }
 
 bool mastercore::settlement_pnl(uint32_t contractId, uint32_t notional_size, bool isOracle, bool isInverseQuoted, uint32_t collateral_currency)

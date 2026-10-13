@@ -82,6 +82,10 @@ public:
     int64_t getUPNL(const uint32_t contractId, const uint32_t notionalSize, bool isOracle = false, bool quoted = false);
 
     bool setBankruptcyPrice(const uint32_t contractId, const uint32_t notionalSize, int64_t initMargin, bool isOracle = false, bool quoted = false);
+    // Absolute write of the BANKRUPTCY_PRICE record; 0 clears it. The single
+    // state-setting path for this record (see the definition for why
+    // updateRecord() cannot be used).
+    bool setBankruptcyPriceValue(uint32_t contractId, int64_t price);
     // direction: sign of the position being closed (> 0 long, < 0 short),
     // used to sign the realized PnL
     bool realizePNL(const std::string& who, uint32_t contractId, int64_t amount, int64_t price, bool isInverseQuoted, uint32_t collateral_currency, int direction);
@@ -113,6 +117,7 @@ namespace mastercore
   
   bool settlement_pnl(uint32_t contractId, uint32_t notional_size, bool isOracle, bool isInverseQuoted, uint32_t collateral_currency);
   bool set_bankruptcy_price_onmap(const std::string& who, const uint32_t& contractId, const uint32_t& notionalSize, const int64_t& initMargin);
+  bool clear_bankruptcy_price_onmap(const std::string& who, const uint32_t& contractId);
 }
 
 #endif // TRADELAYER_REGISTER_H

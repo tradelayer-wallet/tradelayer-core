@@ -211,6 +211,11 @@ void mastercore::updateAllEntry(int64_t oldPosition, int64_t newPosition, int64_
 
        decrease_entry(elem->getAddr(), contract_traded, nCouldBuy, elem->getEffectivePrice(), cd.isInverseQuoted(), cd.collateral_currency, signOld);
 
+       // the position is flat, so its bankruptcy price no longer applies
+       if (!clear_bankruptcy_price_onmap(elem->getAddr(), contract_traded)) {
+           PrintToLog("%s() clearing bankruptcy price Failed\n",__func__);
+       }
+
      // closing position and opening another from different side
    } else if (signOld != signNew && (signOld != 0 && signNew != 0)) {
 
