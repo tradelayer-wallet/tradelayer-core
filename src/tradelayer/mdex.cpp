@@ -128,6 +128,13 @@ void mastercore::takeMargin(int64_t amount, uint32_t contract_traded, const CDIn
 
     // if we need more margin, we add the difference.
     // updating amount reserved for the order
+    // TODO(security): see review finding #2 (gist 5aafd38f6d35cc28ff41821a6dbd1f23):
+    // the success/failure branches below appear inverted - update_tally_map
+    // returns true on success, so on a *successful* debit this logs "Failed"
+    // and skips updateAmountReserved, while on a *failed* debit it reserves
+    // anyway; amount_reserved therefore diverges from actual balances. Not
+    // changed in this batch: flipping the branch is an economically sensitive,
+    // consensus-visible accounting change and needs maintainer sign-off.
     if(!update_tally_map(elem->getAddr(), colateral, -amountOfMoney, BALANCE)){
         elem->updateAmountReserved(amountOfMoney);
     } else {
@@ -178,7 +185,7 @@ void mastercore::updateAllEntry(int64_t oldPosition, int64_t newPosition, int64_
         // decreasing -> delete some contracts in entry
         } else {
 
-            if(!decrease_entry(elem->getAddr(), contract_traded, nCouldBuy, elem->getEffectivePrice(), cd.isInverseQuoted(), cd.collateral_currency)){
+            if(!decrease_entry(elem->getAddr(), contract_traded, nCouldBuy, elem->getEffectivePrice(), cd.isInverseQuoted(), cd.collateral_currency, signOld)){
                 PrintToLog("%s() decreasing position Failed\n",__func__);
             }
         }
@@ -202,13 +209,18 @@ void mastercore::updateAllEntry(int64_t oldPosition, int64_t newPosition, int64_
        update_register_map(elem->getAddr(), contract_traded, -remainingMargin, MARGIN);
        update_tally_map(elem->getAddr(), cd.collateral_currency, remainingMargin, BALANCE);
 
-       decrease_entry(elem->getAddr(), contract_traded, nCouldBuy, elem->getEffectivePrice(), cd.isInverseQuoted(), cd.collateral_currency);
+       decrease_entry(elem->getAddr(), contract_traded, nCouldBuy, elem->getEffectivePrice(), cd.isInverseQuoted(), cd.collateral_currency, signOld);
+
+       // the position is flat, so its bankruptcy price no longer applies
+       if (!clear_bankruptcy_price_onmap(elem->getAddr(), contract_traded)) {
+           PrintToLog("%s() clearing bankruptcy price Failed\n",__func__);
+       }
 
      // closing position and opening another from different side
    } else if (signOld != signNew && (signOld != 0 && signNew != 0)) {
 
          PrintToLog("%s() closing position and opening another from different side\n",__func__);
-         decrease_entry(elem->getAddr(), contract_traded, nCouldBuy, elem->getEffectivePrice(), cd.isInverseQuoted(), cd.collateral_currency);
+         decrease_entry(elem->getAddr(), contract_traded, nCouldBuy, elem->getEffectivePrice(), cd.isInverseQuoted(), cd.collateral_currency, signOld);
 
          const int64_t remainingMargin = getContractRecord(elem->getAddr(), contract_traded, MARGIN);
 
@@ -2988,7 +3000,7 @@ bool mastercore::checkReserve(const std::string& address, int64_t amount, uint32
 }
 
 
-int64_t mastercore::ContractBasisPoints(const CDInfo::Entry& cd, int64_t amount, int64_t leverage)
+bool mastercore::ContractBasisPoints(const CDInfo::Entry& cd, int64_t amount, int64_t leverage, int64_t& required)
 {
     //NOTE: add changes to inverse quoted
     // const int64_t uPrice = COIN;
@@ -3003,8 +3015,22 @@ int64_t mastercore::ContractBasisPoints(const CDInfo::Entry& cd, int64_t amount,
     const arith_uint256 aFee = ConvertTo256(factor.first) * (aPositionRequirement /  ConvertTo256(factor.second));
     const arith_uint256 aRealRequirement = DivideAndRoundUp(aPositionRequirement, aLeverage);
 
+    // Bound the total before converting to int64_t: amount * margin_requirement
+    // / leverage can exceed the int64 range for payload amounts that pass the
+    // per-field checks (e.g. amount = 1e11, margin_requirement = 1e9,
+    // leverage = 1 gives 1e20), and the ConvertTo64() calls below would assert
+    // (debug) or truncate (release). An overflowing requirement is reported as
+    // false with required = MAX_INT_8_BYTES; the caller must reject the order.
+    // (This used to be an in-band sentinel that the caller compared against the
+    // balance; that only rejected because no balance was below the sentinel.)
+    if (ConvertTo256(MAX_INT_8_BYTES) < aFee || ConvertTo256(MAX_INT_8_BYTES) < aRealRequirement || ConvertTo256(MAX_INT_8_BYTES) < (aFee + aRealRequirement)) {
+        required = MAX_INT_8_BYTES;
+        return false;
+    }
+
     // total amount required
-    return (ConvertTo64(aFee) + ConvertTo64(aRealRequirement));
+    required = ConvertTo64(aFee) + ConvertTo64(aRealRequirement);
+    return true;
 
 }
 
@@ -3014,11 +3040,16 @@ bool mastercore::checkContractReserve(const std::string& address, int64_t amount
     if (!_my_cds->getCD(contractId, cd))
        return false;
 
-    amountToReserve = ContractBasisPoints(cd, amount, leverage);
+    const bool fitsInt64 = ContractBasisPoints(cd, amount, leverage, amountToReserve);
 
     PrintToLog("%s(): amountToReserve: %d\n",__func__, amountToReserve);
 
     nBalance = getMPbalance(address, cd.collateral_currency, BALANCE);
+
+    // explicit reject for an overflowing requirement, independent of the balance
+    if (!fitsInt64) {
+        return false;
+    }
 
     return (nBalance < amountToReserve || nBalance == 0) ? false : true;
 

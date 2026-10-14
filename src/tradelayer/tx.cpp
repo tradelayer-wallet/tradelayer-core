@@ -139,6 +139,13 @@ std::vector<uint8_t> CMPTransaction::GetNextVarIntBytes(int &i) {
     std::vector<uint8_t> vecBytes;
 
     do {
+        // Bounds-check before reading pkt[i]: the previous loop dereferenced
+        // pkt[i] first and only checked "i < pkt_size" afterwards, so a
+        // truncated payload read past the end of the packet (and, because the
+        // buffer is zeroed, silently produced a spurious zero-valued field
+        // instead of failing). An empty result makes callers take their
+        // existing "return false" rejection path.
+        if (i < 0 || pkt_size <= i) break;
         vecBytes.push_back(pkt[i]);
         if (!IsMSBSet(&pkt[i])) break;
         i++;
@@ -153,6 +160,10 @@ std::vector<uint8_t> CMPTransaction::GetNextVarIntBytes(int &i) {
 /** Checks whether a pointer to the payload is past it's last position. */
 bool CMPTransaction::isOverrun(const char* p)
 {
+    // NOTE: pos is the one-past-the-end offset of the parsed section, not an
+    // index that gets dereferenced after this check: pos == pkt_size means the
+    // payload was consumed exactly, which is well-formed. Using ">=" here
+    // would reject valid payloads whose last field ends at the boundary.
     ptrdiff_t pos = (char*) p - (char*) &pkt;
     return (pos > pkt_size);
 }
@@ -3411,8 +3422,70 @@ int CMPTransaction::logicMath_CreateContractDex()
   return 0;
 }
 
+/**
+ * Shared payload validation for the contract-trade execution paths
+ * (logicMath_ContractDexTrade and logicMath_Contract_Instant) - adversarial
+ * re-review fix: logicMath_Contract_Instant used to run the same division on
+ * completely unchecked wire fields.
+ *
+ * These values come straight off the wire (the RPC-side ParseLeverage bounds
+ * do not apply to relayed/mined transactions) and are used as divisors and
+ * ConvertTo256() arguments further down (checkContractReserve ->
+ * ContractBasisPoints -> DivideAndRoundUp(..., ConvertTo256(leverage))):
+ * leverage == 0 throws uint_error("Division by zero") from
+ * arith_uint256::operator/=, which is uncaught during block connection and
+ * aborts it; negative values trip ConvertTo256's assert(number >= 0) (abort
+ * in debug, UB in release). Reject before any arithmetic instead.
+ *
+ * nLeverage is taken as uint64_t so a negative int64_t payload value wraps to
+ * a huge unsigned one and is rejected by the range check, instead of relying
+ * on signed comparison behavior.
+ *
+ * Returns 0 when the payload is acceptable, or a negative error code
+ * (CONTRACTDEX_ERROR - 2..-5), mirroring how every other logicMath_* signals
+ * failure: a literal false/0 would be treated as *fully valid* by
+ * mastercore_handler_tx (bValid = (0 <= interp_ret)).
+ */
+static int validateContractTradePayload(uint64_t nLeverage, uint64_t nAmount, uint64_t nPrice, uint64_t nTradingAction)
+{
+  if (nLeverage < 1 || 10 < nLeverage) {
+      PrintToLog("%s(): rejected: leverage out of range [1,10]: %d\n", __func__, nLeverage);
+      return (CONTRACTDEX_ERROR - 2);
+  }
+
+  // amount and price are uint64_t on the wire but flow into int64_t
+  // parameters (checkContractReserve -> ContractBasisPoints -> ConvertTo256),
+  // so a negative payload value wraps to a huge unsigned one and becomes
+  // negative again on conversion: bound both to the int64 range exactly like
+  // the other logicMath_* value checks do ("<= 0 or MAX_INT_8_BYTES < x").
+  if (nAmount == 0 || MAX_INT_8_BYTES < nAmount) {
+      PrintToLog("%s(): rejected: amount of contracts out of range or zero: %d\n", __func__, nAmount);
+      return (CONTRACTDEX_ERROR - 3);
+  }
+
+  if (nPrice == 0 || MAX_INT_8_BYTES < nPrice) {
+      PrintToLog("%s(): rejected: price out of range or zero: %d\n", __func__, nPrice);
+      return (CONTRACTDEX_ERROR - 4);
+  }
+
+  if (nTradingAction != buy && nTradingAction != sell) {
+      PrintToLog("%s(): rejected: invalid trading action: %d\n", __func__, nTradingAction);
+      return (CONTRACTDEX_ERROR - 5);
+  }
+
+  return 0;
+}
+
 int CMPTransaction::logicMath_ContractDexTrade()
 {
+  // Validate the payload-derived fields on the consensus side before any
+  // arithmetic (shared helper, also used by logicMath_Contract_Instant; see
+  // the comment at validateContractTradePayload for the failure modes).
+  const int validation = validateContractTradePayload(leverage, amount, effective_price, trading_action);
+  if (validation != 0) {
+      return validation;
+  }
+
   auto fco = getFutureContractObject(name_traded);
   const uint32_t contractId = fco.fco_propertyId;
   const uint32_t expiration = fco.fco_blocks_until_expiration;
@@ -4136,6 +4209,11 @@ int CMPTransaction::logicMath_AcceptOfferBTC()
 
   if (nValue <= 0 || MAX_INT_8_BYTES < nValue) {
     PrintToLog("%s(): rejected: value out of range or zero: %d\n", __func__, nValue);
+    // Previously this check only logged and fell through to DEx_acceptCreate
+    // with an invalid value. Return the standard "value out of range" error
+    // (negative codes invalidate the tx; a literal "return false" would be 0
+    // and mark the tx *valid* in mastercore_handler_tx).
+    return (DEX_ERROR_ACCEPT -23);
   }
 
   // if(!t_tradelistdb->checkKYCRegister(sender,4) || !t_tradelistdb->checkKYCRegister(receiver,4))
@@ -4804,6 +4882,19 @@ int CMPTransaction::logicMath_Contract_Instant()
         return (PKT_ERROR_SP -22);
     }
 
+    // Validate the payload-derived fields before any arithmetic - shared with
+    // logicMath_ContractDexTrade (adversarial re-review fix). This path used
+    // to run ConvertTo256(instant_amount) * ConvertTo256(marginRe) /
+    // ConvertTo256(ileverage) on completely unchecked wire fields: ileverage
+    // == 0 threw uint_error("Division by zero") from
+    // arith_uint256::operator/= (uncaught during block connection, aborting
+    // it), negative values tripped ConvertTo256's assert(number >= 0), and
+    // itrading_action was passed unchecked to Instant_x_Trade.
+    const int validation = validateContractTradePayload(ileverage, instant_amount, price, itrading_action);
+    if (validation != 0) {
+        return validation;
+    }
+
     // PrintToLog("%s(): SENDER (multisig address): %s, SPECIAL REF (first address): %s,  RECEIVER (second address): %s\n",__func__, sender, special, receiver);
 
     Channel chn;
@@ -4848,8 +4939,21 @@ int CMPTransaction::logicMath_Contract_Instant()
        return (PKT_ERROR_KYC -20);
     }
 
-    const int64_t marginRe = static_cast<int64_t>(sp.margin_requirement);
-    const arith_uint256 amountTR = (ConvertTo256(instant_amount) * ConvertTo256(marginRe)) / (ConvertTo256(ileverage));
+    // sp.margin_requirement is uint64_t contract state: convert it unsigned
+    // (a static_cast<int64_t> of a value >= 2^63 would wrap negative and trip
+    // ConvertTo256's assert).
+    const arith_uint256 amountTR = (ConvertTo256(instant_amount) * ConvertTo256(sp.margin_requirement)) / (ConvertTo256(ileverage));
+
+    // Bound the required margin before converting back to int64_t
+    // (adversarial re-review fix): instant_amount = 1e11 and
+    // margin_requirement = 1e9 (both passing the checks above, and
+    // margin_requirement being contract state) give a product of 1e20, where
+    // ConvertTo64() would assert (debug) or truncate (release).
+    if (ConvertTo256(MAX_INT_8_BYTES) < amountTR) {
+        PrintToLog("%s: rejected: required margin out of range\n", __func__);
+        return (CONTRACTDEX_ERROR - 6);
+    }
+
     const int64_t amountToReserve = ConvertTo64(amountTR);
 
     if(msc_debug_contract_instant_trade) PrintToLog("%s: AmountToReserve: %d\n", __func__, amountToReserve);

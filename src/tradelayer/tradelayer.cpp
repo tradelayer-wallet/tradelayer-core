@@ -7933,9 +7933,17 @@ int64_t mastercore::getContractTradesVWAP(uint32_t contractId, int nBlocks)
      if (it != cdexlastprice.end())
      {
          const auto& blockMap = it->second;
-         for(auto itt = blockMap.rbegin() ; itt != blockMap.rend(), nBlocks > 0; itt++){
+         // The previous condition used the comma operator ("itt !=
+         // blockMap.rend(), nBlocks > 0"), so the end iterator was never
+         // checked and itt walked past rend() whenever the map holds fewer
+         // than nBlocks entries (out-of-bounds read in a consensus path).
+         for(auto itt = blockMap.rbegin() ; itt != blockMap.rend() && nBlocks > 0; itt++){
              const auto& v = itt->second;
-             sum += std::accumulate(v.begin(), v.end(), 0);
+             // int64_t accumulator: the trades in v are int64_t prices and the
+             // implicit int accumulator (0) overflowed INT32_MAX once a block
+             // traded >= ~11 contracts-worth of 2e8 sat prices (undefined
+             // behavior in a consensus path)
+             sum += std::accumulate(v.begin(), v.end(), int64_t(0));
              nBlocks--;
          }
 

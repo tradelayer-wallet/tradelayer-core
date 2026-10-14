@@ -85,6 +85,14 @@ bool CMPTally::updateMoney(uint32_t propertyId, int64_t amount, TallyType ttype)
         // NOTE:
         // Negative balances are only permitted for pending balances
         //make sure any excess uPNL that goes to negative numbers flattens to 0
+        // TODO(security): see review finding #2 (gist 5aafd38f6d35cc28ff41821a6dbd1f23):
+        // an over-draft debit is silently clamped to 0 here and still reported
+        // as success (true), while the counterpart register/position is
+        // credited the full amount - breaking double-entry conservation and
+        // allowing leveraged positions whose collateral was clamped rather
+        // than deducted. Not changed in this batch: rejecting with false
+        // instead of clamping is economically sensitive and needs maintainer
+        // sign-off (consensus-visible for existing state).
         if(amount<0&&now64-(amount*-1)<0){now64=0;}
         mp_token[propertyId].balance[ttype] = now64;
         fUpdated = true;

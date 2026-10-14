@@ -66,7 +66,7 @@ public:
 
     bool insertEntry(uint32_t contractId, int64_t amount, int64_t price);
 
-    bool decreasePosRecord(const std::string& who, uint32_t contractId, int64_t amount, int64_t price, bool inverse, int64_t collateral_currency);
+    bool decreasePosRecord(const std::string& who, uint32_t contractId, int64_t amount, int64_t price, bool inverse, int64_t collateral_currency, int direction);
 
     int64_t getEntryPrice(uint32_t contractId, int64_t amount) const;
 
@@ -82,7 +82,13 @@ public:
     int64_t getUPNL(const uint32_t contractId, const uint32_t notionalSize, bool isOracle = false, bool quoted = false);
 
     bool setBankruptcyPrice(const uint32_t contractId, const uint32_t notionalSize, int64_t initMargin, bool isOracle = false, bool quoted = false);
-    bool realizePNL(const std::string& who, uint32_t contractId, int64_t amount, int64_t price, bool isInverseQuoted, uint32_t collateral_currency);
+    // Absolute write of the BANKRUPTCY_PRICE record; 0 clears it. The single
+    // state-setting path for this record (see the definition for why
+    // updateRecord() cannot be used).
+    bool setBankruptcyPriceValue(uint32_t contractId, int64_t price);
+    // direction: sign of the position being closed (> 0 long, < 0 short),
+    // used to sign the realized PnL
+    bool realizePNL(const std::string& who, uint32_t contractId, int64_t amount, int64_t price, bool isInverseQuoted, uint32_t collateral_currency, int direction);
     int64_t getLiquidationPrice(const uint32_t contractId, const uint32_t notionalSize, const uint64_t marginRequirement) const;
 
     const Entries* getEntries(const uint32_t contractId) const;
@@ -103,7 +109,7 @@ namespace mastercore
 
   bool insert_entry(const std::string& who, uint32_t contractId, int64_t amount, int64_t price);
 
-  bool decrease_entry(const std::string& who, uint32_t contractId, int64_t amount, int64_t price, bool inverse, int64_t collateral_currency);
+  bool decrease_entry(const std::string& who, uint32_t contractId, int64_t amount, int64_t price, bool inverse, int64_t collateral_currency, int direction);
 
   bool getFullContractRecord(const std::string& address, uint32_t contractId, UniValue& position_obj, const CDInfo::Entry& cd);
 
@@ -111,6 +117,7 @@ namespace mastercore
   
   bool settlement_pnl(uint32_t contractId, uint32_t notional_size, bool isOracle, bool isInverseQuoted, uint32_t collateral_currency);
   bool set_bankruptcy_price_onmap(const std::string& who, const uint32_t& contractId, const uint32_t& notionalSize, const int64_t& initMargin);
+  bool clear_bankruptcy_price_onmap(const std::string& who, const uint32_t& contractId);
 }
 
 #endif // TRADELAYER_REGISTER_H
