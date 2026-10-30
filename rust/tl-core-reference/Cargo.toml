@@ -1,0 +1,10 @@
+[package]
+name = "tl-core-reference"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.90"
+description = "Byte-exact Rust reference for the TradeLayer C++ payload layer and activation rules (differential oracle)"
+license-file = "../../LICENSE"
+publish = false
+
+[dependencies]
