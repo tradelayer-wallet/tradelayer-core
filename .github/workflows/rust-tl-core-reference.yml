@@ -1,0 +1,59 @@
+name: Rust tl-core-reference
+on:
+  pull_request:
+    paths: ['rust/tl-core-reference/**', '.github/workflows/rust-tl-core-reference.yml']
+  push:
+    branches: [master]
+    paths: ['rust/tl-core-reference/**', '.github/workflows/rust-tl-core-reference.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  rust:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: rust/tl-core-reference
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.90.0 --profile minimal --component rustfmt --component clippy
+      - name: Fetch pinned crates
+        run: cargo fetch --locked
+      - name: Unit, differential-vector, property and source-parity tests
+        run: cargo test --locked --offline
+      - name: Regenerate C++ vectors and require they are unchanged
+        run: |
+          bash scripts/build-vectors.sh
+          git diff --exit-code -- fixtures
+      - name: Clippy
+        run: cargo clippy --locked --offline --all-targets -- -D warnings
+      - name: Format
+        run: cargo fmt --all -- --check
+  lean:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: rust/tl-core-reference/lean
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Install elan
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+      - name: Build
+        run: lake build
+      - name: No sorry or admit
+        run: |
+          if grep -rnwE 'sorry|admit' --include=*.lean .; then echo "sorry/admit found"; exit 1; fi
+      - name: Axiom check
+        run: |
+          out=$(lake env lean AxiomCheck.lean)
+          echo "$out"
+          if echo "$out" | grep -q sorryAx; then echo "sorryAx found"; exit 1; fi

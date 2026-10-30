@@ -1,0 +1,5 @@
+name = "tl_core_ref"
+defaultTargets = ["TlCoreRef"]
+
+[[lean_lib]]
+name = "TlCoreRef"
