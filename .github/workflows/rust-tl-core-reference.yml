@@ -3,7 +3,7 @@ on:
   pull_request:
     paths: ['rust/tl-core-reference/**', '.github/workflows/rust-tl-core-reference.yml']
   push:
-    branches: [master]
+    branches: [master, feat/rust-port]
     paths: ['rust/tl-core-reference/**', '.github/workflows/rust-tl-core-reference.yml']
   workflow_dispatch:
 permissions:
